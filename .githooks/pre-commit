@@ -1,0 +1,18 @@
+#!/usr/bin/env sh
+# AI Data Protection Agent -- Git pre-commit hook.
+#
+# This script is deliberately thin: all detection/policy logic lives in
+# ai_data_protection_agent.git (Python), reusing the same PIIDetector and
+# PolicyEngine as the HTTP API. This file only wires Git to that code.
+#
+# PROTECTION_AGENT_PROJECT: path to the ai-data-protection-agent project
+# (the one containing pyproject.toml). Defaults to THIS repo's own top
+# level, which is correct when this hook is protecting this same project.
+# To protect a DIFFERENT repository, set this environment variable (or a
+# git config value read into it) to point at wherever this project lives
+# on disk -- see README "Installing in another repository".
+
+PROJECT_DIR="${PROTECTION_AGENT_PROJECT:-$(git rev-parse --show-toplevel)}"
+
+uv run --project "$PROJECT_DIR" python -m ai_data_protection_agent.git.cli scan-staged
+exit $?
