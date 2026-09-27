@@ -1041,6 +1041,50 @@ This skips the hook entirely, with no warning shown by Git itself. This is real,
 
 ---
 
+# Deploying to Vercel
+
+**Read this before deploying — Vercel is not a natural fit for this project, and it's deployed here with known, real risks, not despite them being hidden.**
+
+Measured directly (not estimated): this project's installed dependencies total **~259 MB** (`spacy` 89MB, `blis` 22MB, `phonenumbers` 21MB, `numpy` 41MB, the `en_core_web_sm` language model 15MB, `thinc` 10MB, plus smaller packages). Vercel serverless functions have a **~250 MB uncompressed size limit**. This deployment is right at, or over, that ceiling before Vercel's own runtime overhead is even added — it may fail to deploy, or may work today and break on a future dependency bump with no easy fix (spaCy/numpy can't be meaningfully slimmed down).
+
+**Separately, and just as important:** Vercel runs this app as multiple independent, ephemeral serverless instances with **no shared memory between them**. Two features in this codebase were built as deliberately simple, single-process, in-memory components (documented as a known MVP limitation back in Phase 6):
+- The **rate limiter** (`api/rate_limit.py`): "100 requests/60s" becomes "100 requests/60s *per cold instance*" on Vercel — the effective limit is much looser and unpredictable than it looks.
+- **`/metrics`** (`api/metrics.py`): counts are per-instance; repeated calls can return different, incomplete numbers depending on which instance answers.
+
+Neither of these was changed for this deployment — fixing them properly would mean swapping in a shared external store (e.g. Redis), which is a real architecture change, not a config tweak, and wasn't requested. They still function, they just no longer mean exactly what their names imply once you're running on more than one instance.
+
+## What was added for Vercel (nothing else in the codebase changed)
+
+- **`api/index.py`** (repo root — a new, separate `api/` from `src/ai_data_protection_agent/api/`): the file Vercel's Python builder looks for. It adds `src/` to `sys.path` and re-exports the existing FastAPI `app` object unchanged — no application logic lives here.
+- **`vercel.json`**: tells Vercel to build `api/index.py` with `@vercel/python`, and rewrites every incoming path to it (FastAPI does its own internal routing, so Vercel just needs to forward everything to the one function).
+- **`requirements.txt`**: generated with `uv export --no-dev --format requirements.txt -o requirements.txt` (Vercel's Python builder installs from `requirements.txt`, not `pyproject.toml`/`uv.lock` directly). The `-e .` self-reference `uv export` adds by default was removed — Vercel doesn't need it, and depending on the `uv_build` backend inside an unfamiliar build image was avoided on purpose.
+  > Regenerate this file with the same command any time dependencies change — it is not kept in sync automatically.
+- **`.vercelignore`**: excludes `tests/`, `scripts/`, `.githooks/`, `.venv/`, and other dev-only content from the deployed bundle.
+
+## Environment variables
+
+`.env` is excluded from deployment (`.vercelignore` + `.gitignore`) — as it should be, it's never meant to be committed. Set real values instead in **Vercel's dashboard → Project Settings → Environment Variables**:
+
+| Variable | Purpose |
+|---|---|
+| `PROTECTION_API_KEY` | Same as local (Section 8/15) — if unset, auth stays disabled in production too, which you almost certainly don't want for a public deployment. |
+| `GIT_PROTECTION_*` | Irrelevant here — Git protection is a local pre-commit feature, not part of the deployed API at all. |
+
+## Other things that will behave differently on Vercel (not fixed, just documented)
+
+- **Cold starts.** The app's `lifespan` startup hook (added in Phase 6 specifically to pre-load the spaCy model before the first real request) may or may not actually run the way it does under Uvicorn — Vercel's Python/ASGI adapter's exact lifespan support wasn't verified here (no live Vercel deployment was available to test against). If it doesn't fire, the existing `@lru_cache` singleton (`get_protection_service()`) still works correctly — it just builds lazily on the first request to reach a given cold instance instead of at startup, meaning that first request pays the multi-second model-load cost instead of it happening pre-traffic. Either way, correctness is unaffected — only latency.
+- **Execution time limits.** Vercel functions have a configurable max duration (10s on the Hobby tier by default). This project's existing size limits (100,000-byte body / 20,000-char text, from Phase 5/6) already keep a single request's detection time well under a second once warm, so this should not be an issue in practice — flagged here so it's a known, checked assumption rather than an unverified one.
+
+## Deploying
+
+```bash
+npm install -g vercel   # Vercel's CLI, if you don't already have it
+vercel                  # from this project's root — follow the prompts
+```
+Set `PROTECTION_API_KEY` in the Vercel dashboard before (or right after) your first deploy. Verify the same way as local (Section 11/12): open `https://<your-project>.vercel.app/docs` and run through MV-03 through MV-06.
+
+---
+
 ## Current Status (what's actually built)
 
 **Protection API path**: detection, sanitization, policy engine, HTTP API, auth (opt-in), rate limiting, size limits, safe logging, safe metrics, a permanent security regression suite, and a manual verification guide.
